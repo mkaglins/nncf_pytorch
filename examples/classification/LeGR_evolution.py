@@ -278,31 +278,31 @@ def evolution_agent_train(Environment, Optimizer, env_params, agent_params):
     agent_params['initial_filter_ranks'] = env.filter_pruner.filter_ranks
     agent = Optimizer(agent_params)
 
-    # rewards = []
-    # loss_list = []
-    # for episode in range(GENERATIONS):
-    #     print('Episode {}'.format(episode))
-    #     state, info = env.reset()
-    #     # agent.reset_episode()
-    #
-    #     done = 0
-    #     reward = 0
-    #     episode_reward = 0
-    #     episode_loss = 0
-    #     agent.tell(state, reward, done, episode, info)
-    #
-    #     while not done:
-    #         action = agent.ask(episode)
-    #         new_state, reward, done, info = env.step(action)
-    #         acc, loss = reward
-    #         agent.tell(state, loss, done, episode, info)
-    #
-    #         state = new_state
-    #         episode_reward += acc
-    #     episode_loss = loss
-    #     print('LOSS = {}'.format(loss))
-    #     rewards.append(episode_reward)
-    #     loss_list.append(episode_loss)
+    rewards = []
+    loss_list = []
+    for episode in range(GENERATIONS):
+        print('Episode {}'.format(episode))
+        state, info = env.reset()
+        # agent.reset_episode()
+
+        done = 0
+        reward = 0
+        episode_reward = 0
+        episode_loss = 0
+        agent.tell(state, reward, done, episode, info)
+
+        while not done:
+            action = agent.ask(episode)
+            new_state, reward, done, info = env.step(action)
+            acc, loss = reward
+            agent.tell(state, loss, done, episode, info)
+
+            state = new_state
+            episode_reward += acc
+        episode_loss = loss
+        print('LOSS = {}'.format(loss))
+        rewards.append(episode_reward)
+        loss_list.append(episode_loss)
 
     # plt.plot(rewards, label='acc')
     # plt.plot(loss_list, label='loss')
@@ -314,8 +314,7 @@ def evolution_agent_train(Environment, Optimizer, env_params, agent_params):
     # For best pertrubation: prune in a couple of points and train after it
     print('TRAINING BEST')
     # print(agent.best_perturbation)
-    best_action = [(0.9523247039647237, 0.0059166863010517365), (0.06616199410691898, 0.010925692344522672), (1.0363579766123368, 0.17492651898356876), (0.2500522311032416, 0.017765162425197246), (0.2870894452683066, 0.0912859785231145), (0.8589463253468572, -0.03110662174558847), (0.7894852572515542, 0.014857275144723025), (0.511966504058008, 0.004632019945235133), (0.14004343582363069, 0.0057173834526893395), (2.1119262464778004, -0.032838014741784084), (1.692132034767594, 0.008980188213233375), (1.5844332778833574, -0.3337644556777085), (1.2939479223842636, 0.024928044146028627), (0.5369594671457361, 0.3394366805002351), (0.29652711027016776, 0.04911852120018792), (1.063093143269316, 0.21513373390252613), (0.936112593996413, -0.0523976465409824), (0.30073017622136444, -0.05428922404837233), (0.3670833228033171, -0.07429837000091642), (7.53370810549988, 0.3710561188994756), (0.42095524822352415, -0.1580455573868255), (3.7115087860743525, 0.6441893488170822), (1.2059867850001083, -0.029025290034205967), (0.553517954256249, 0.24271155919668055), (0.9852073093520342, 0.2834108673560017), (2.7323820026486594, 0.45217136405312663), (3.4062731793642254, 0.3534607461023111), (0.28970283716882217, -0.139186180132496), (0.27676942426011486, 0.08833461532433572), (1.2641994836663626, 0.08304310227925361), (3.8340772575351947, -0.015990575249850775), (0.2710827019676598, 0.14864237837339), (1.1719224221101663, -0.5591096147393491), (2.0918130590694224, -0.06043594774794842)]
-# agent.best_perturbation
+    best_action = agent.best_perturbation
 
     for pr in PRUNING_TARGETS:
         state, info = env.reset()
