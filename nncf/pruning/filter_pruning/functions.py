@@ -27,6 +27,12 @@ def l2_filter_norm(weight_tensor):
     return torch.norm(weight_tensor.view(weight_tensor.shape[0], -1), p=2, dim=1)
 
 
+def l2_legr_filter_norm(weight_tensor):
+    """
+    Calculates L2 for weight_tensor for the first dimension.
+    """
+    return torch.pow(weight_tensor, 2).sum(1).sum(1).sum(1)
+
 def tensor_l2_normalizer(weight_tensor):
     norm = torch.sqrt(torch.sum(torch.abs(weight_tensor) ** 2))
     return weight_tensor / norm
@@ -52,6 +58,7 @@ def geometric_median_filter_norm(weight_tensor):
 
 FILTER_IMPORTANCE_FUNCTIONS = {
     'L2': l2_filter_norm,
+    'L2_legr': l2_legr_filter_norm,
     'L1': l1_filter_norm,
     'geometric_median': geometric_median_filter_norm
 }

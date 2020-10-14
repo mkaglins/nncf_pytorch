@@ -3,3 +3,4 @@ from .resnet_cifar import *
 from .squeezenet import *
 from .rmnet_cifar import *
 from .mobilenetv3 import *
+from .legr_mobilenet_v2 import *

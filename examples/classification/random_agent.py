@@ -18,7 +18,7 @@ from nncf.dynamic_graph.context import Scope
 MAX_SPARSITY = 0.8
 MAX_SPARSITY_2 = 0.8
 
-class MyPruner():
+class SimplePruner():
     def __init__(self, model, compression_algo, metric, num_cls):
         self.model = model
         self.algo = compression_algo
@@ -56,7 +56,6 @@ class MyPruner():
         self.params_counts = {nx_node['key']: self._get_params_number_in_node(nx_node) for nx_node in self.layers_top_sort}
         self.flops_by_layer = {i: self._get_params_number_in_node(self.get_nx_by_num_in_info(i)) for i in
                                range(len(self.algo.pruned_module_info))}
-        pass
 
     def save_weights(self):
         weight_list = {}
@@ -139,7 +138,6 @@ class MyPruner():
         return params_count
 
     def reset(self):
-        # zeroing all params ?
         self.restore_weights()
         self.init_params()
 
@@ -199,13 +197,12 @@ class MyPruner():
         # прям по всем модулям, а тут просто для каких-то из них надо предположить, что уменьшилось число параметров.
         # Тупой вариант-хранить сколько было в начале и дальше уменьшать на то насколько попрунили
 
-        rest = self.get_params_number_after_layer(layer_counter)
         if layer_counter >= len(self.activation_to_conv) - 1:
             rest_max_flops = 0  # rest и rest-max flops будем вместе считать
         else:
             rest_max_flops = self.get_params_number_after_layer(layer_counter + 1) - self.get_rest_max_number_of_elems(
                 layer_counter + 1)
-        return next_layer, cost, rest, rest_max_flops
+        return next_layer, cost, rest_max_flops
 
 
 def measure_model(model, pruner, img_size):
@@ -215,172 +212,6 @@ def measure_model(model, pruner, img_size):
     cur_flops = pruner.cur_flops
     cur_size = pruner.cur_size
     return cur_flops, cur_size
-
-
-class ReplayBuffer(object):
-
-    def __init__(self, buffer_size):
-        self.buffer_size = buffer_size
-        self.count = 0
-        self.buffer = deque()
-
-    def add(self, s, a, r, t, s2):
-        experience = (s, a, r, t, s2)
-        if self.count < self.buffer_size:
-            self.buffer.append(experience)
-            self.count += 1
-        else:
-            self.buffer.popleft()
-            self.buffer.append(experience)
-
-    def size(self):
-        return self.count
-
-    def sample_batch(self, batch_size):
-        '''
-        batch_size specifies the number of experiences to add
-        to the batch. If the replay buffer has less than batch_size
-        elements, simply return all of the elements within the buffer.
-        Generally, you'll want to wait until the buffer has at least
-        batch_size elements before beginning to sample from it.
-        '''
-        batch = []
-
-        if self.count < batch_size:
-            batch = random.sample(self.buffer, self.count)
-        else:
-            batch = random.sample(self.buffer, batch_size)
-
-        s_batch = torch.Tensor([_[0].numpy() for _ in batch])
-        a_batch = np.array([_[1] for _ in batch])
-        r_batch = np.array([_[2] for _ in batch])
-        t_batch = np.array([_[3] for _ in batch])
-        s2_batch = torch.Tensor([_[4].numpy() for _ in batch])
-
-        return s_batch, a_batch, r_batch, t_batch, s2_batch
-
-    def clear(self):
-        self.buffer.clear()
-        self.count = 0
-
-
-class ActorNetwork(nn.Module):
-    def __init__(self, state_dim, action_dim):
-        super(ActorNetwork, self).__init__()
-        self.net = nn.Sequential(
-            nn.Linear(state_dim, 400),
-            nn.LayerNorm(400),
-            nn.ReLU(inplace=True),
-            nn.Linear(400, 300),
-            nn.LayerNorm(300),
-            nn.ReLU(inplace=True),
-            nn.Linear(300, action_dim),
-            nn.Sigmoid()
-        )
-        self.net[6].weight.data.mul_(0.1)
-        self.net[6].bias.data.mul_(0.1)
-
-    def forward(self, state):
-        return self.net(state)
-
-
-class CriticNetwork(nn.Module):
-    def __init__(self, state_dim, action_dim):
-        super(CriticNetwork, self).__init__()
-        self.embed_state = nn.Sequential(
-            nn.Linear(state_dim, 400),
-            nn.LayerNorm(400),
-            nn.ReLU(inplace=True),
-            nn.Linear(400, 300),
-        )
-        self.embed_action = nn.Sequential(
-            nn.Linear(action_dim, 300),
-        )
-        self.joint = nn.Sequential(
-            nn.LayerNorm(300),
-            nn.ReLU(inplace=True),
-            nn.Linear(300, 1)
-        )
-        self.joint[2].weight.data.mul_(0.1)
-        self.joint[2].bias.data.mul_(0.1)
-
-    def forward(self, state, action):
-        state = self.embed_state(state)
-        action = self.embed_action(action)
-        value = self.joint(state + action)
-        return value
-
-
-class Actor(object):
-    def __init__(self, state_dim, action_dim, learning_rate, tau):
-        self.net = ActorNetwork(state_dim, action_dim)
-        self.target_net = ActorNetwork(state_dim, action_dim)
-        self.tau = tau
-        self.optimizer = optim.Adam(self.net.parameters(), lr=learning_rate)
-        self.update_target_network(1)
-
-    def train_step(self, policy_loss):
-        self.net.zero_grad()
-        policy_loss.backward()
-        self.optimizer.step()
-
-    def predict(self, state):
-        return self.net(state)
-
-    def predict_target(self, state):
-        return self.target_net(state)
-
-    def update_target_network(self, custom_tau=-1):
-        if custom_tau >= 0:
-            tau = custom_tau
-        else:
-            tau = self.tau
-        target_params = self.target_net.named_parameters()
-        params = self.net.named_parameters()
-
-        dict_target_params = dict(target_params)
-
-        for name, param in params:
-            if name in dict_target_params:
-                dict_target_params[name].data.copy_(tau * param.data + (1 - tau) * dict_target_params[name].data)
-
-
-class Critic(object):
-    def __init__(self, state_dim, action_dim, learning_rate, tau):
-        self.net = CriticNetwork(state_dim, action_dim)
-        self.target_net = CriticNetwork(state_dim, action_dim)
-        self.tau = tau
-        self.optimizer = optim.Adam(self.net.parameters(), lr=learning_rate)
-        self.criterion = nn.MSELoss()
-        self.update_target_network(1)
-
-    def train_step(self, state, action, target):
-        self.net.zero_grad()
-        pred = self.net(state, action)
-        loss = self.criterion(pred, target)
-        loss.backward()
-        self.optimizer.step()
-        return pred
-
-    def predict(self, state, action):
-        return self.net(state, action)
-
-    def predict_target(self, state, action):
-        return self.target_net(state, action)
-
-    def update_target_network(self, custom_tau=-1):
-        if custom_tau >= 0:
-            tau = custom_tau
-        else:
-            tau = self.tau
-        target_params = self.target_net.named_parameters()
-        params = self.net.named_parameters()
-
-        dict_target_params = dict(target_params)
-
-        for name, param in params:
-            if name in dict_target_params:
-                dict_target_params[name].data.copy_(tau * param.data + (1 - tau) * dict_target_params[name].data)
 
 
 class AMCEnv(object):
@@ -412,7 +243,7 @@ class AMCEnv(object):
         self.filter_pruner.reset()
         self.model.eval()
 
-        self.full_size = self.filter_pruner.get_params_number_in_model()
+        self.full_size = self.filter_pruner.get_flops_number_in_model()
         # Using params count instead of flops
         self.full_flops = self.full_size  # self.filter_pruner.cur_flops
         self.checked = []
@@ -496,7 +327,7 @@ class AMCEnv(object):
 
     def train_steps(self, steps):
         self.model.train()
-        optimizer = optim.SGD(self.model.parameters(), lr=1e-2, momentum=0.9, weight_decay=4e-5, nesterov=True)
+        optimizer = optim.SGD(self.model.parameters(), lr=4.5e-3, momentum=0.9, weight_decay=4e-5, nesterov=True)
         criterion = torch.nn.CrossEntropyLoss()
 
         s = 0
@@ -567,16 +398,13 @@ class AMCEnv(object):
     def step(self, action):
         self.last_act = action
 
-        self.layer_counter, self.cost, self.rest, rest_max_flops = self.filter_pruner.compress(self.layer_counter,
-                                                                                                   action,
-                                                                                                   self.max_sparsity)
+        self.layer_counter, self.cost, rest_max_flops = self.filter_pruner.prune_layer(self.layer_counter,
+                                                                                       action,
+                                                                                       self.max_sparsity)
         # rest - число элементов в тех, что еще не попрунили (после текущего то есть)
         self.reduced = self.full_flops - self.cost # cost - то, сколько еще осталось во всей сети сейчас
 
-        m_flop, m_size = 0, 0
-
         top1 = 0
-        # TODO: rewrite this for layers (?)
         if self.layer_counter >= len(self.filter_pruner.activation_to_conv):
             # Just finish, evaluate reward (AFTER LAST LAYER CASE)
             state = torch.zeros(1)
@@ -584,80 +412,34 @@ class AMCEnv(object):
             # SOME INFO ABOUT PRUNED FILTERS AT THE END
             print('Pruning actions ', self.filter_pruner.pruning_levels)
             self.filter_pruner.really_prune_model()
-            # self.filter_pruner.algo.run_batchnorm_adaptation()
-            self.train_steps(self.steps)
+            self.filter_pruner.algo.run_batchnorm_adaptation()
+            # self.train_steps(self.steps)
             top1, loss = self.test(self.val_loader)
             reward = loss
             terminal = 1
         else:
-            # prune current layer
-            flops = self.filter_pruner.get_num_params_for_layer(self.layer_counter)
-
-            conv = self.filter_pruner.activation_to_conv[self.layer_counter]
-            h = self.filter_pruner.omap_size[self.layer_counter][0]
-            w = self.filter_pruner.omap_size[self.layer_counter][1]
-
-            state = torch.Tensor([float(self.layer_counter) / len(self.filter_pruner.activation_to_conv),
-                                  float(self.filter_pruner.conv_out_channels[self.layer_counter]) / self.max_oc, # output channels
-                                  float(self.filter_pruner.conv_in_channels[self.layer_counter]) / self.max_ic, # input channels
-                                  float(h) / self.max_fh, # H
-                                  float(w) / self.max_fw, # W
-                                  float(conv.stride[0]) / self.max_stride,  # stride ?
-                                  float(conv.weight.size(2)) / self.max_k, # kernel size
-                                  float(flops) / self.full_flops, # FLOPS in current layer
-                                  float(self.reduced) / self.full_flops,  # is the total number of reduced FLOPs in previous layers
-                                  float(self.rest) / self.full_flops,  # Rest is the number of remaining FLOPs in the following layers
-                                  self.last_act])  # action
             reward = 0
             terminal = 0
+            flops = self.filter_pruner.get_num_flops_for_layer_by_top_order(self.layer_counter)
 
-        return state, reward, top1, terminal, [self.full_flops, rest_max_flops, self.reduced, flops, m_flop, m_size]
-
-
-class OrnsteinUhlenbeckActionNoise:
-    def __init__(self, mu, sigma=0.3, theta=.15, dt=1e-2, x0=None):
-        self.theta = theta
-        self.mu = mu
-        self.sigma = sigma
-        self.dt = dt
-        self.x0 = x0
-        self.reset()
-
-    def __call__(self):
-        x = self.x_prev + self.theta * (self.mu - self.x_prev) * self.dt + \
-            self.sigma * np.sqrt(self.dt) * np.random.normal(size=self.mu.shape)
-        self.x_prev = x
-        return torch.Tensor(x)
-
-    def reset(self):
-        self.x_prev = self.x0 if self.x0 is not None else np.zeros_like(self.mu)
-
-    def __repr__(self):
-        return 'OrnsteinUhlenbeckActionNoise(mu={}, sigma={})'.format(self.mu, self.sigma)
+        return reward, top1, terminal, [self.full_flops, rest_max_flops, self.reduced, flops]
 
 
-def run_rl_agent(logger, model, compression_algo, data_loaders, coeff, LOSS):
+def run_random_agent(logger, model, compression_algo, data_loaders, coeff, LOSS):
     while isinstance(model, nn.DataParallel):
         model = model.module
 
-    PRUNER = MyPruner(model, compression_algo, 'L1', 100)
+    PRUNER = SimplePruner(model, compression_algo, 'L1', 100)
     prune_away = 30
 
     TARGET = prune_away / 100.
-    TAU = 1e-2
     EPISODES = 400
-    SIGMA = 0.3
-    MINI_BATCH_SIZE = 64
-    EXPLORE = 100
+    SIGMA = 0.8
+    EXPLORE = 250
     b = None
     np.random.seed(98)
 
-    actor = Actor(11, 1, 1e-4, TAU)
-    critic = Critic(11, 1, 1e-3, TAU)
-
-    env = AMCEnv(data_loaders, 'CIFAR100', PRUNER, model, MAX_SPARSITY, 'L1', 200,
-                 None)
-    replay_buffer = ReplayBuffer(6000)
+    env = AMCEnv(data_loaders, 'CIFAR100', PRUNER, model, MAX_SPARSITY, 'L1', 200, None)
     best_reward = - 1000.0
     best_acc = 0
     best_actions = {}
@@ -675,14 +457,11 @@ def run_rl_agent(logger, model, compression_algo, data_loaders, coeff, LOSS):
         rewards = []
         states_actions = []
         while not t:
-            a = torch.clamp(actor.predict(s.view(1, -1)) + np.random.normal(0, SIGMA), 0, MAX_SPARSITY).detach().numpy()
+            a = np.clip(np.random.uniform(0, SIGMA), 0, MAX_SPARSITY)
             W_duty = TARGET * info[0] - info[1] - info[2]
-
-            # logger.info('LAYER {}, action = {}, W_duty = {}, info = {}'.format(env.layer_counter, a[0][0], W_duty, info))
-
             a = np.maximum(float(W_duty) / info[3], a)
             a = np.minimum(a, MAX_SPARSITY)
-            s2, r, top1, t, info = env.step(a)
+            r, top1, t, info = env.step(a)
             states_actions.append((s, a))
             if LOSS:
                 r = - r - coeff * np.abs(a - TARGET)  # - np.log10(info[2]) * (100 - r)
@@ -690,60 +469,16 @@ def run_rl_agent(logger, model, compression_algo, data_loaders, coeff, LOSS):
                 r = top1 - coeff * np.abs(a - TARGET)
 
             rewards.append(r)
-
-            if episode > EXPLORE:
-                s_batch, a_batch, r_batch, t_batch, s2_batch = \
-                    replay_buffer.sample_batch(MINI_BATCH_SIZE)
-
-                target_q = critic.predict_target(
-                    s2_batch, actor.predict_target(s2_batch))
-
-                y_i = torch.Tensor(
-                    r_batch.reshape(-1, 1) + (1 - t_batch.reshape(-1, 1)) * target_q.detach().numpy().reshape(-1,
-                                                                                                              1) - b)
-
-                # Update the critic given the targets
-                predicted_q_value = critic.train_step(s_batch, torch.Tensor(a_batch).view(-1, 1), y_i)
-
-                # Update the actor policy using the sampled gradient
-                policy_loss = -critic.predict(s_batch, actor.predict(s_batch))
-                policy_loss = policy_loss.mean()
-                actor.train_step(policy_loss)
-
-                # Update target networks
-                actor.update_target_network()
-                critic.update_target_network()
             if t:
                 if best_reward < r and info[2]/info[0] > 0.25:
                     best_reward = r
                     best_actions = env.filter_pruner.pruning_levels
                     best_acc = top1
-
-            s = s2.clone()
         logger.info('ACTIONS = {}'.format( env.filter_pruner.pruning_levels))
         logger.info('REWARD = {}'.format(r))
         logger.info('REALLY pruned {}'.format(info[2]/info[0]))
-
-        rewards = np.max(rewards) * np.ones_like(rewards)
-        for idx, (state, action) in enumerate(states_actions):
-            if idx != len(states_actions) - 1:
-                t = 0
-                next_state = states_actions[idx + 1][0]
-            else:
-                t = 1
-                next_state = torch.zeros_like(state)
-            replay_buffer.add(state, action, rewards[idx], t, next_state)
-
-        if not b:
-            b = np.mean(rewards)
-        else:
-            b = 0.95 * b + (1 - 0.95) * np.mean(rewards)
-
         print('Time for this episode: {:.2f}s'.format(time.time() - e_start))
         e_start = time.time()
     end = time.time()
-    # print('BEST reward: {}'.format(best_reward))
-    # print('BEST actions: {}'.format(best_actions))
-
     print('Finished. Total search time: {:.2f}h'.format((end - start) / 3600.))
     return best_reward, best_acc, best_actions

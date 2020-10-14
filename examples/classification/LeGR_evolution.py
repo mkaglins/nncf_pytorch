@@ -1,25 +1,19 @@
 import queue
-import time
 
+import matplotlib.pyplot as plt
 import torch
-import numpy as np
+from examples.common.utils import print_statistics
 from torch import optim
 
-from examples.common.utils import print_statistics
-
-from nncf.pruning.filter_pruning.functions import calculate_binary_mask
-
-from nncf.dynamic_graph.context import Scope
-
-from examples.classification.RL_agent import ReplayBuffer, Critic, Actor
-from examples.classification.RL_training_template import AgentOptimizer
-import networkx as nx
-import torch.nn as nn
-import matplotlib
-import matplotlib.pyplot as plt
+from LeGRPruner import LeGRBasePruner
+from RL_training_template import AgentOptimizer
+from train_test_utils import test, train_steps, train
+from nncf.pruning.export_helpers import Convolution, StopMaskForwardOps, Elementwise
+from nncf.pruning.utils import get_sources_of_node, is_depthwise_conv, _find_next_nodes_of_types
+import numpy as np
+from examples.common.example_logger import logger
 
 SCALE_SIGMA = 1
-GENERATIONS = 200
 
 
 class EvolutionOptimizer(AgentOptimizer):
@@ -30,9 +24,9 @@ class EvolutionOptimizer(AgentOptimizer):
         self.minimum_loss = 20
         self.best_perturbation = None
         self.POPULATIONS = 64
+        self.GENERATIONS = kwargs.get('GENERATIONS', {})
         self.SAMPLES = 16
 
-        SCALE_SIGMA = 1
         self.MUTATE_PERCENT = 0.1
         self.index_queue = queue.Queue(self.POPULATIONS)
         self.oldest_index = None
@@ -62,12 +56,11 @@ class EvolutionOptimizer(AgentOptimizer):
 
     def _predict_action(self):
         """
-        Predict action for the last state
-        :return:
+        Predict action for the last state.
+        :return: action (pertrubation)
         """
         i = self.episode
-        step_size = 1 - (float(i) / (GENERATIONS * 1.25))
-        # Perturn distribution
+        step_size = 1 - (float(i) / (self.GENERATIONS * 1.25))
         perturbation = []
 
         if i == self.POPULATIONS - 1:
@@ -102,7 +95,7 @@ class EvolutionOptimizer(AgentOptimizer):
 
     def ask(self, episode_num):
         """
-
+        Returns action for the last told state
         :return:
         """
         self.episode = episode_num
@@ -112,7 +105,7 @@ class EvolutionOptimizer(AgentOptimizer):
 
     def tell(self, state, reward, end_of_episode, episode_num, info):
         """
-        Getting info about episode step
+        Getting info about episode step and save it every end of episode
         :return:
         """
         # save state, reward and info
@@ -126,17 +119,17 @@ class EvolutionOptimizer(AgentOptimizer):
 
 
 class LeGREvolutionEnv():
-    def __init__(self, loaders, filter_pruner, model, max_sparsity, steps, pruning_max):
+    def __init__(self, loaders, filter_pruner, model, train_steps, pruning_max, config):
         self.prune_target = pruning_max
-        self.train_loader, self.val_loader = loaders
+        self.train_loader, self.train_sampler, self.val_loader = loaders
         self.test_loader = self.val_loader
 
         # self.model_name = model
         self.pruner = filter_pruner
-        self.max_sparsity = max_sparsity
-        self.steps = steps
+        self.steps = train_steps
         self.orig_model = model
-        self.orig_model = self.orig_model.cuda()
+        self.orig_model = self.orig_model
+        self.config = config
 
     def reset(self):
         self.model = self.orig_model
@@ -144,150 +137,68 @@ class LeGREvolutionEnv():
         self.filter_pruner.reset()
         self.model.eval()
 
-        self.full_size = self.filter_pruner.get_params_number_in_model()
-        # Using params count instead of flops
-        self.full_flops = self.full_size
+        self.full_flops = self.filter_pruner.get_flops_number_in_model()
         self.checked = []
         self.layer_counter = 0
-        self.rest = self.full_flops # self.filter_pruner.get_params_number_after_layer(0)
+        self.rest = self.full_flops  # self.filter_pruner.get_params_number_after_layer(0)
         self.last_act = (1, 0)
 
         return torch.zeros(1), [self.full_flops, self.rest]
 
-    def test(self, data_loader, n_img=-1):
-        self.model.eval()
-        correct = 0
-        total = 0
-        total_len = len(data_loader)
-        criterion = torch.nn.CrossEntropyLoss()
-        if n_img > 0 and total_len > int(np.ceil(float(n_img) / data_loader.batch_size)):
-            total_len = int(np.ceil(float(n_img) / data_loader.batch_size))
-        for i, (batch, label) in enumerate(data_loader):
-            if i >= total_len:
-                break
-            batch, label = batch.to('cuda'), label.to('cuda')
-            output = self.model(batch)
-            loss = criterion(output, label)
-            pred = output.data.max(1)[1]
-            correct += pred.eq(label).sum()
-            total += label.size(0)
-            if (i % 100 == 0) or (i == total_len - 1):
-                print('Testing | Batch ({}/{}) | Top-1: {:.2f} ({}/{})'.format(i + 1, total_len, \
-                                                                               float(correct) / total * 100, correct,
-                                                                               total))
-        self.model.train()
-        return float(correct) / total * 100, loss.item()
-
-    def get_reward(self):
-        return self.test(self.val_loader)
-
     def train_steps(self, steps):
-        self.model.train()
-        optimizer = optim.SGD(self.model.parameters(), lr=1e-2, momentum=0.9, weight_decay=4e-5, nesterov=True)
         criterion = torch.nn.CrossEntropyLoss()
+        optimizer = optim.SGD(self.model.parameters(), lr=1e-2, momentum=0.9, weight_decay=5e-4, nesterov=True)  #nesterov=True
+        train_steps(self.train_loader, self.model, criterion, optimizer, logger, self.config, steps)
 
-        s = 0
-        avg_loss = []
-        iterator = iter(self.train_loader)
-        while s < steps:
-            try:
-                batch, label = next(iterator)
-            except StopIteration:
-                iterator = iter(self.train_loader)
-                batch, label = next(iterator)
-            batch, label = batch.to('cuda'), label.to('cuda')
-            optimizer.zero_grad()
-            out = self.model(batch)
-            loss = criterion(out, label)
-            loss.backward()
-            avg_loss.append(loss.item())
-            optimizer.step()
-            s += 1
-        print('Avg Loss: {:.3f}'.format(np.mean(avg_loss)))
-
-    def train_epoch(self, optim, criterion):
-        self.model.train()
-        total = 0
-        top1 = 0
-
-        data_t = 0
-        train_t = 0
-        total_loss = 0
-        s = time.time()
-        for i, (batch, label) in enumerate(self.train_loader):
-            data_t += time.time() - s
-            s = time.time()
-            optim.zero_grad()
-            batch, label = batch.to('cuda'), label.to('cuda')
-            total += batch.size(0)
-
-            out = self.model(batch)
-            loss = criterion(out, label)
-            loss.backward()
-            total_loss += loss.item()
-            optim.step()
-            train_t += time.time() - s
-
-            if (i % 100 == 0) or (i == len(self.train_loader) - 1):
-                print('Batch ({}/{}) | Loss: {:.3f} | (PerBatch) Data: {:.3f}s,  Network: {:.3f}s'.format(
-                    i + 1, len(self.train_loader), total_loss / (i + 1), data_t / (i + 1), train_t / (i + 1)))
-            s = time.time()
-
-    def train(self, epochs, name=""):
+    def train(self, epochs):
         model = self.model
         optimizer = optim.SGD(model.parameters(), lr=1e-2, momentum=0.9, weight_decay=5e-4, nesterov=True)
         scheduler = optim.lr_scheduler.MultiStepLR(optimizer, [int(epochs * 0.3), int(epochs * 0.6), int(epochs * 0.8)],
                                                    gamma=0.2)
         criterion = torch.nn.CrossEntropyLoss()
+        return train(model, self.config,  criterion, scheduler, optimizer, self.train_loader, self.train_sampler, self.val_loader, epochs, logger)
 
-        for e in range(epochs):
-            print('Epoch {}...'.format(e))
-            print('Train')
-            self.train_epoch(optimizer, criterion)
-
-            top1, _ = self.test(self.test_loader)
-            print('Test | Top-1: {:.2f}'.format(top1))
-            scheduler.step()
-        top1, _ = self.test(self.test_loader)
-        # torch.save(model, './ckpt/{}_final.t7'.format(name))
-        return top1
+    def get_reward(self):
+        return test(self.val_loader, self.model, torch.nn.CrossEntropyLoss(), logger, self.config.device)
 
     def step(self, action):
         self.last_act = action
         new_state = torch.zeros(1)
+        # set pruning coeffs for every layers
         for i in range(len(action)):
             self.filter_pruner.prune_layer(i, [action[i]])
 
         reduced = self.filter_pruner.actually_prune_all_layers(self.full_flops*self.prune_target)
-        # self.filter_pruner.algo.run_batchnorm_adaptation(self.filter_pruner.algo.config)
-        self.train_steps(200)
-        # print_statistics(self.filter_pruner.algo.statistics())
-        # LOSS AS REWARD
+        # print_statistics(self.filter_pruner.algo.statistics(), logger)
+        self.train_steps(self.steps)
+        # print_statistics(self.filter_pruner.algo.statistics(), logger)
+
         acc, loss = self.get_reward()
         done = 1
         info = [self.full_flops, reduced]
         return new_state, (acc, loss), done, info
 
-PRUNING_MAX = 0.8
-PRUNING_TARGETS = [0.1, 0.3, 0.5, 0.7, 0.9] #[0.9, 0.87, 0.84, 0.81, 0.78]
+
+class LeGREvoPruner(LeGRBasePruner):
+    pass
 
 
-def evolution_agent_train(Environment, Optimizer, env_params, agent_params):
-    env = Environment(*env_params, PRUNING_MAX)
+def evolution_chain_agent_train(Environment, Optimizer, env_params, agent_params, GENERATIONS, PRUNING_TARGETS):
+    env = Environment(*env_params)
     env.reset()
     agent_params['initial_filter_ranks'] = env.filter_pruner.filter_ranks
     agent = Optimizer(agent_params)
 
-    rewards = []
+    accuracy = []
     loss_list = []
     for episode in range(GENERATIONS):
-        print('Episode {}'.format(episode))
+        logger.info('Episode {}'.format(episode))
         state, info = env.reset()
-        # agent.reset_episode()
 
+        # Beginning of the episode
         done = 0
         reward = 0
-        episode_reward = 0
+        episode_acc = 0
         episode_loss = 0
         agent.tell(state, reward, done, episode, info)
 
@@ -295,36 +206,54 @@ def evolution_agent_train(Environment, Optimizer, env_params, agent_params):
             action = agent.ask(episode)
             new_state, reward, done, info = env.step(action)
             acc, loss = reward
+            # LOSS AS REWARD
             agent.tell(state, loss, done, episode, info)
 
             state = new_state
-            episode_reward += acc
+            episode_acc += acc
         episode_loss = loss
-        print('LOSS = {}'.format(loss))
-        rewards.append(episode_reward)
+        logger.info('Testing loss = {}'.format(loss))
+        accuracy.append(episode_acc)
         loss_list.append(episode_loss)
 
-    # plt.plot(rewards, label='acc')
+    # # Plot EA training
+    logger.info('Accuracy = {}'.format(accuracy))
+    logger.info('Loss = {}'.format(loss_list))
+    # plt.plot(accuracy, label='acc')
     # plt.plot(loss_list, label='loss')
     # plt.legend()
     # plt.xlabel('Epoch')
-    # plt.ylabel('BN-adapted reward')
-    # plt.savefig('mobilenet_evo_03.png')
+    # plt.ylabel('200 steps trained')
+    # plt.savefig('/home/mkaglins/work/pruning/RL_experiments_results/mobilenet_legr_model_evo_087_400.png')
+
+    # plt.clf()
 
     # For best pertrubation: prune in a couple of points and train after it
-    print('TRAINING BEST')
-    # print(agent.best_perturbation)
+    logger.info('TRAINING BEST')
+    logger.info(agent.best_perturbation)
     best_action = agent.best_perturbation
 
+    acc_for_targets = []
+
     for pr in PRUNING_TARGETS:
+        logger.info('')
+        logger.info('Training for target pruning = {}'.format(pr))
         state, info = env.reset()
         for i in range(len(best_action)):
             env.filter_pruner.prune_layer(i, [best_action[i]])
         env.filter_pruner.actually_prune_all_layers(env.full_flops * pr)
-
+        # print_statistics(env.filter_pruner.algo.statistics(), logger)
         epochs = 60
-        env.train(epochs)
+        acc = env.train(epochs)
+        print_statistics(env.filter_pruner.algo.statistics(), logger)
         acc, loss = env.get_reward()
-        print('For pruning = {}, acc = {}'.format(pr, acc))
-    # for pruning_reate in PRUNING_TARGETS:
-    #     # Prune model
+        logger.info('For pruning = {}, acc = {}'.format(pr, acc))
+        acc_for_targets.append(acc)
+
+    logger.info('Accuracy for target points = {}'.format(acc_for_targets))
+
+    # plt.plot(PRUNING_TARGETS, acc_for_targets)
+    # plt.xlabel('Pruning level')
+    # plt.ylabel('60 epochs trained accuracy')
+    # plt.title('Mobilenetv2, CIFAR100, LeGR-EA')
+    # plt.savefig('/home/mkaglins/work/pruning/RL_experiments_results/mobilenet_final_acc_087_400.png')

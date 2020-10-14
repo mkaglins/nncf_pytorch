@@ -49,6 +49,7 @@ class BasePruningAlgoBuilder(CompressionAlgorithmBuilder):
         self.prune_last = params.get('prune_last_conv', False)
         self.prune_batch_norms = params.get('prune_batch_norms', False)
         self.prune_downsample_convs = params.get('prune_downsample_convs', False)
+        self.LEGR_prune_depthwise_convs = params.get('LEGR_prune_depthwise_convs', True)
 
         self._pruned_module_info = []
 
@@ -89,7 +90,7 @@ class BasePruningAlgoBuilder(CompressionAlgorithmBuilder):
                                  " this scope is one of the last convolutions".format(module_scope_str))
                 continue
 
-            if is_grouped_conv(module):
+            if is_grouped_conv(module) and not self.LEGR_prune_depthwise_convs:
                 if is_depthwise_conv(module):
                     previous_conv = get_previous_conv(target_model, module, module_scope)
                     if previous_conv:
@@ -191,7 +192,7 @@ class BasePruningAlgoController(CompressionAlgorithmController):
             mask = mask.to(grad.device)
             return apply_filter_binary_mask(mask, grad)
 
-        for minfo in self.pruned_module_info[:1]:
+        for minfo in self.pruned_module_info:
             mask = minfo.operand.binary_filter_pruning_mask
             weight = minfo.module.weight
             partial_hook = update_wrapper(partial(hook, mask=mask), hook)

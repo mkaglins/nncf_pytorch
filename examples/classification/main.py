@@ -27,6 +27,7 @@ import torchvision.datasets as datasets
 import torchvision.models as models
 import torchvision.transforms as transforms
 import warnings
+from copy import copy
 from functools import partial
 from shutil import copyfile
 from torch.optim.lr_scheduler import ReduceLROnPlateau
@@ -46,7 +47,7 @@ from examples.common.utils import configure_logging, configure_paths, create_cod
 from examples.common.utils import write_metrics
 from nncf import create_compressed_model
 from nncf.compression_method_api import CompressionLevel
-from nncf.dynamic_graph.graph_builder import create_input_infos
+from nncf.dynamic_graph.graph_builder import create_input_infos, create_mock_tensor
 from nncf.initialization import register_default_init_args
 from nncf.utils import manual_seed, safe_thread_call, is_main_process
 
@@ -129,7 +130,8 @@ def main_worker(current_gpu, config: SampleConfig):
     pretrained = is_pretrained_model_requested(config)
 
     if config.to_onnx is not None:
-        assert pretrained or (resuming_checkpoint_path is not None)
+        # assert pretrained or (resuming_checkpoint_path is not None)
+        pass
     else:
         # Data loading code
         train_dataset, val_dataset = create_datasets(config)
@@ -143,9 +145,7 @@ def main_worker(current_gpu, config: SampleConfig):
                        num_classes=config.get('num_classes', 1000),
                        model_params=config.get('model_params'),
                        weights_path=config.get('weights'))
-
     model.to(config.device)
-
     resuming_model_sd = None
     resuming_checkpoint = None
     if resuming_checkpoint_path is not None:
@@ -291,6 +291,8 @@ def create_datasets(config):
     elif dataset_config == 'cifar100':
         normalize = transforms.Normalize(mean=(0.4914, 0.4822, 0.4465),
                                          std=(0.2023, 0.1994, 0.2010))
+        # normalize = transforms.Normalize(mean=(0.485, 0.456, 0.406),
+        #                                  std=(0.229, 0.224, 0.225))
     elif dataset_config == 'cifar10':
         normalize = transforms.Normalize(mean=(0.5, 0.5, 0.5),
                                          std=(0.5, 0.5, 0.5))
@@ -299,8 +301,8 @@ def create_datasets(config):
     image_size = input_info_list[0].shape[-1]
     size = int(image_size / 0.875)
     val_transform = transforms.Compose([
-        transforms.Resize(size),
-        transforms.CenterCrop(image_size),
+        transforms.Resize(size), # comment fo LEGR version
+        transforms.CenterCrop(image_size),  # comment fo LEGR version
         transforms.ToTensor(),
         normalize,
     ])
@@ -308,6 +310,7 @@ def create_datasets(config):
     val_dataset = get_dataset(dataset_config, config, val_transform, is_train=False)
 
     train_transforms = transforms.Compose([
+        # transforms.RandomCrop(image_size, padding=4),  # LEGR version
         transforms.RandomResizedCrop(image_size),
         transforms.RandomHorizontalFlip(),
         transforms.ToTensor(),
