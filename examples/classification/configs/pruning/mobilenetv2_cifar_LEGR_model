@@ -1,0 +1,46 @@
+{
+    "model": "MobileNetV2_CIFAR10",
+    "weights":  "/home/mkaglins/work/pruning/mobilenetv2_legr.pth",
+    "input_info": {
+      "sample_size": [2, 3, 32, 32]
+    },
+    "batch_size": 128,
+    "dataset": "CIFAR100",
+    "num_classes": 100,
+    "dataset_dir": "/home/mkaglins/work/datasets/cifar/",
+    "epochs": 100,
+    "optimizer": {
+        "type": "SGD",
+        "base_lr": 0.1,
+        "weight_decay": 5e-4,
+        "schedule_type": "multistep",
+        "optimizer_params":
+        {
+            "momentum": 0.9,
+            "nesterov": true
+        },
+         "steps": [
+            20,
+            40,
+            60,
+            80
+        ]
+    },
+    "compression": {
+        "algorithm": "filter_pruning",
+        "params": {
+            "schedule": "baseline",
+            "prune_first_conv": true,
+            "prune_last_conv": true,
+            "prune_downsample_convs" : true,
+            "pruning_init": 0.0,
+            "pruning_target": 0.0,
+            "num_init_steps": 0,
+            "weight_importance": "L2_legr",
+        },
+//        "initializer":
+//        {"batchnorm_adaptation":
+//            {"num_bn_adaptation_steps": 100}
+//        }
+    }
+}
